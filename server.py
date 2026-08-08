@@ -508,6 +508,7 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 18px 16px 10px;
     display: flex;
     flex-direction: column;
+    justify-content: flex-end;
     gap: 2px;
   }
 
