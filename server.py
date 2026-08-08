@@ -69,6 +69,22 @@ chat_history = []
 _REMEMBER_RE = re.compile(r"(.+?)って覚えて|覚えて[、。]?(.+)?$")
 _NAME_RE = re.compile(r"私の名前は(.+?)です")
 
+# ── トークン節約用の設定 ──────────────────────────────────────────
+# Groq無料枠の1日あたりトークン上限(TPD)に早く達してしまう問題への対策。
+# 天気・ニュースの詳細ブロックは、話題に関係するときだけシステムプロンプトに
+# 乗せる(聞かれてもいないのに毎回まるごと送っていたのをやめる)。
+_WEATHER_KEYWORDS = ("天気", "気温", "暑い", "寒い", "雨", "雪", "傘", "湿度", "予報")
+_NEWS_KEYWORDS = ("ニュース", "news", "時事", "話題のニュース")
+
+# 会話履歴は直近何件(=何往復×2)だけモデルに送るか。
+# 多いほど文脈は保たれるが、その分毎回のトークン消費も増える。
+_HISTORY_MESSAGES_TO_KEEP = 12  # 直近6往復ぶん
+
+
+def _mentions_any(text, keywords):
+    lowered = text.lower()
+    return any(k.lower() in lowered for k in keywords)
+
 # ミタマの表情ファイル(static/mitama/配下)。感情分類の出力キーと対応させる。
 EMOTION_FILES = {
     "smile": "smile.png",
@@ -99,7 +115,7 @@ def try_remember(user_input):
     return False
 
 
-def build_system_prompt():
+def build_system_prompt(user_input=""):
     now = datetime.now(JST)
     weekday = WEEKDAY_JP[now.weekday()]
     lines = [
@@ -107,56 +123,63 @@ def build_system_prompt():
         f"現在日時: {now.strftime('%Y年%m月%d日')}({weekday}) {now.strftime('%H:%M')}(日本時間)",
     ]
 
-    # 天気・ニュースはUIのHUD/ニュース枠と同じデータソースをそのままLLMにも
-    # 渡すことで、チャットで聞かれたときにその場で正しく答えられるようにする。
-    current_weather = weather.get_current_weather()
-    if current_weather:
-        weather_line = (
-            "現在の天気(函館市): "
-            f"{current_weather['condition']}({current_weather['icon']}) "
-            f"気温{current_weather['temp']}°C 湿度{current_weather['humidity']}%"
-        )
-        if "today_condition" in current_weather:
-            weather_line += f" / 今日の予報: {current_weather['today_condition']}"
-        if "today_max" in current_weather and "today_min" in current_weather:
-            weather_line += (
-                f" / 今日の最高{current_weather['today_max']}°C"
-                f"・最低{current_weather['today_min']}°C"
+    # 天気・ニュースの詳細は、話題に関係するとき(キーワードに一致したとき)だけ
+    # システムプロンプトに乗せる。毎回まるごと送るとGroqの1日トークン上限に
+    # すぐ達してしまうため(該当しないときは何も足さず、後段の指示文で
+    # 「必要ならPC版/元記事を見てほしい」旨を伝える)。
+    ask_weather = _mentions_any(user_input, _WEATHER_KEYWORDS)
+    ask_news = _mentions_any(user_input, _NEWS_KEYWORDS)
+
+    if ask_weather:
+        current_weather = weather.get_current_weather()
+        if current_weather:
+            weather_line = (
+                "現在の天気(函館市): "
+                f"{current_weather['condition']}({current_weather['icon']}) "
+                f"気温{current_weather['temp']}°C 湿度{current_weather['humidity']}%"
             )
-        lines.append(weather_line)
+            if "today_condition" in current_weather:
+                weather_line += f" / 今日の予報: {current_weather['today_condition']}"
+            if "today_max" in current_weather and "today_min" in current_weather:
+                weather_line += (
+                    f" / 今日の最高{current_weather['today_max']}°C"
+                    f"・最低{current_weather['today_min']}°C"
+                )
+            lines.append(weather_line)
 
-        if "tomorrow_condition" in current_weather:
-            lines.append(
-                "明日の天気(函館市): "
-                f"{current_weather['tomorrow_condition']}"
-                f"({current_weather.get('tomorrow_icon', '')}) "
-                f"最高{current_weather.get('tomorrow_max', '?')}°C"
-                f"・最低{current_weather.get('tomorrow_min', '?')}°C"
+            if "tomorrow_condition" in current_weather:
+                lines.append(
+                    "明日の天気(函館市): "
+                    f"{current_weather['tomorrow_condition']}"
+                    f"({current_weather.get('tomorrow_icon', '')}) "
+                    f"最高{current_weather.get('tomorrow_max', '?')}°C"
+                    f"・最低{current_weather.get('tomorrow_min', '?')}°C"
+                )
+        else:
+            lines.append("現在の天気情報は取得できませんでした(取得エラー)。")
+
+        weekly_days = weather.get_weekly_forecast()
+        if weekly_days:
+            week_line = "今週の天気(函館市): " + " / ".join(
+                f"{d['date']}({d['weekday']}) {d['condition']}"
+                + (f" {d['max']}/{d['min']}°C" if d['max'] is not None else "")
+                for d in weekly_days
             )
-    else:
-        lines.append("現在の天気情報は取得できませんでした(取得エラー)。")
+            lines.append(week_line)
 
-    weekly_days = weather.get_weekly_forecast()
-    if weekly_days:
-        week_line = "今週の天気(函館市): " + " / ".join(
-            f"{d['date']}({d['weekday']}) {d['condition']}"
-            + (f" {d['max']}/{d['min']}°C" if d['max'] is not None else "")
-            for d in weekly_days
-        )
-        lines.append(week_line)
-
-    news_data = news.get_news()
-    featured = news_data.get("featured")
-    others = news_data.get("others") or []
-    if featured:
-        detail = f"注目ニュース: 「{featured['title']}」"
-        if featured.get("description"):
-            detail += f" — {featured['description']}"
-        lines.append(detail)
-    if others:
-        lines.append("その他の見出し:\n" + "\n".join(f"・{h}" for h in others))
-    if not featured and not others:
-        lines.append("最新ニュースは取得できませんでした(取得エラー)。")
+    if ask_news:
+        news_data = news.get_news()
+        featured = news_data.get("featured")
+        others = news_data.get("others") or []
+        if featured:
+            detail = f"注目ニュース: 「{featured['title']}」"
+            if featured.get("description"):
+                detail += f" — {featured['description']}"
+            lines.append(detail)
+        if others:
+            lines.append("その他の見出し:\n" + "\n".join(f"・{h}" for h in others))
+        if not featured and not others:
+            lines.append("最新ニュースは取得できませんでした(取得エラー)。")
 
     if memory.get("user_name"):
         lines.append(f"ユーザーの名前: {memory['user_name']}")
@@ -164,9 +187,11 @@ def build_system_prompt():
     lines.append(
         "注意: 分からないことを自信ありげに作り話しないでください。"
         "分からない場合は正直に「分かりません」と答えてください。"
-        "上記の天気・ニュース情報は、ユーザーから聞かれたときや話題に関係する"
-        "ときだけ使ってください。毎回の返答で自分から天気やニュースの話を"
-        "始める必要はありません。"
+        "上記に天気・ニュース情報がある場合は、それに関する質問にだけ使ってください。"
+        "無い場合(このメッセージが天気・ニュースの話題と判定されなかった場合)に"
+        "天気やニュースを聞かれたら、正直に「今すぐ確認しますね」という趣旨を伝え、"
+        "存在しない天気やニュースの内容を作り話しないでください。"
+        "毎回の返答で自分から天気やニュースの話を始める必要はありません。"
         "「今日のニュース」などと聞かれた場合は、上記の注目ニュースについて、"
         "分かっている情報(タイトル・概要)をもとに3〜4文程度でそこそこ詳しく、"
         "分かりやすく説明してください。概要の情報が少ない場合は、"
@@ -185,8 +210,10 @@ def build_system_prompt():
 
 
 def ask_ozzy(user_input, history, mode="casual"):
-    messages = [{"role": "system", "content": build_system_prompt()}]
-    messages += history
+    messages = [{"role": "system", "content": build_system_prompt(user_input)}]
+    # 会話履歴は直近_HISTORY_MESSAGES_TO_KEEP件だけ送る(全件送ると
+    # 会話が長引くほど1往復あたりのトークン消費が膨らんでいくため)。
+    messages += history[-_HISTORY_MESSAGES_TO_KEEP:]
     messages.append({"role": "user", "content": user_input})
 
     try:

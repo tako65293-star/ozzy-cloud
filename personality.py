@@ -27,8 +27,10 @@ def build_personality_prompt():
 
 # response_style(casual/confirmation)に応じてGroqの生成トークン数上限を切り替える。
 # 「簡潔に」という指示だけでなく物理的にも長さを制限する(PC版と同じ狙い)。
+# casualは400→320に下げてある(Groq無料枠の1日トークン上限に早く達しないための対策。
+# 体感の会話の長さはあまり変わらない範囲で調整)。
 _NUM_PREDICT = {
-    "casual": 400,
+    "casual": 320,
     "confirmation": 120,
 }
 

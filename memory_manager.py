@@ -123,13 +123,15 @@ def set_user_name(name):
 
 
 def build_memory_prompt():
-    """rules→profile→preferences→goals→projects→knowledge→experiences(直近5件)の順で整形する。"""
+    """rules→profile→preferences→goals→projects→knowledge→experiences(直近3件)の順で整形する。
+    experiencesを5→3件に減らしているのは、毎回のシステムプロンプトに丸ごと乗るぶんの
+    トークン消費を抑えるため(Groq無料枠の1日トークン上限対策)。"""
     order = ["rules", "profile", "preferences", "goals", "projects", "knowledge"]
     lines = []
     for c in order:
         for fact in _memory.get(c, []):
             lines.append(f"・{fact}")
-    for fact in _memory.get("experiences", [])[-5:]:
+    for fact in _memory.get("experiences", [])[-3:]:
         lines.append(f"・{fact}")
     if not lines:
         return "(まだ記憶はありません)"
