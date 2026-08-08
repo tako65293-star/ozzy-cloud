@@ -116,6 +116,8 @@ def build_system_prompt():
             f"{current_weather['condition']}({current_weather['icon']}) "
             f"気温{current_weather['temp']}°C 湿度{current_weather['humidity']}%"
         )
+        if "today_condition" in current_weather:
+            weather_line += f" / 今日の予報: {current_weather['today_condition']}"
         if "today_max" in current_weather and "today_min" in current_weather:
             weather_line += (
                 f" / 今日の最高{current_weather['today_max']}°C"
@@ -126,8 +128,10 @@ def build_system_prompt():
         if "tomorrow_condition" in current_weather:
             lines.append(
                 "明日の天気(函館市): "
-                f"{current_weather['tomorrow_condition']}({current_weather['tomorrow_icon']}) "
-                f"最高{current_weather['tomorrow_max']}°C・最低{current_weather['tomorrow_min']}°C"
+                f"{current_weather['tomorrow_condition']}"
+                f"({current_weather.get('tomorrow_icon', '')}) "
+                f"最高{current_weather.get('tomorrow_max', '?')}°C"
+                f"・最低{current_weather.get('tomorrow_min', '?')}°C"
             )
     else:
         lines.append("現在の天気情報は取得できませんでした(取得エラー)。")

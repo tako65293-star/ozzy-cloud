@@ -1,18 +1,33 @@
 """
 weather.py — 天気ウィジェット用のヘルパー。
 
-Open-Meteo(https://open-meteo.com/)を使用。APIキー登録・クレジットカード登録が
-一切不要な無料の天気APIなので、GROQ_API_KEYのような環境変数設定も要らない。
+現在の気温・湿度は Open-Meteo(https://open-meteo.com/、APIキー不要)から取得する。
+今日/明日の天気・最高/最低気温は、気象庁(JMA)が公式サイトで公開している
+予報JSON(https://www.jma.go.jp/bosai/forecast/)から直接取得する。
+どちらもAPIキー登録・クレジットカード登録が一切不要な無料のAPI。
 
-現在地点は函館市の緯度経度を既定値としている。別の場所にしたい場合は
-下のLAT/LONを書き換えるだけでよい。
+JMAの予報JSONは正式に公開されたAPIではなく、気象庁サイトの表示用データを
+そのまま利用しているだけなので、将来仕様が変わって取得できなくなる可能性はある。
+その場合は_get_jma_forecast()の中身がNoneを返すだけなので、今日/明日の情報が
+欠けるだけで、現在の気温取得(Open-Meteo側)には影響しない。
+
+現在地点は函館市を既定値としている。別の場所にしたい場合は
+下のLAT/LON/JMA_AREA_CODEを書き換えるだけでよい。
+JMAの地域コードは https://www.jma.go.jp/bosai/common/const/area.json で調べられる。
 """
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 
 LAT = 41.7687
 LON = 140.7291
+
+# 気象庁の地域コード(函館地方気象台)。他の地域にしたい場合はここを変更する。
+JMA_AREA_CODE = "017000"
+JMA_FORECAST_URL = f"https://www.jma.go.jp/bosai/forecast/data/forecast/{JMA_AREA_CODE}.json"
+
+JST = timezone(timedelta(hours=9))
 
 _CACHE_TTL = 10 * 60  # 10分
 _cache = {"data": None, "fetched_at": 0.0}
@@ -42,6 +57,108 @@ _CODE_MAP = {
     96: ("雷雨", "⛈️"),
     99: ("雷雨", "⛈️"),
 }
+
+
+def _jma_code_icon(code):
+    """
+    JMAのweatherCode(3桁の文字列。100番台=晴、200番台=曇、300番台=雨、400番台=雪)から
+    絵文字をざっくり決める。個々のコードの完全な意味までは追わない(HUD用途には過剰なため)。
+    """
+    if not code:
+        return "🌡️"
+    head = code[0]
+    return {"1": "☀️", "2": "☁️", "3": "🌧️", "4": "❄️", "5": "🌨️"}.get(head, "🌡️")
+
+
+def _find_date_index(time_defines, target_date):
+    """
+    ISO8601の日時文字列リスト(例: "2026-08-08T00:00:00+09:00")の中から、
+    target_date(date型)と日付が一致する最初のインデックスを返す。無ければNone。
+    """
+    for i, t in enumerate(time_defines or []):
+        try:
+            d = datetime.fromisoformat(t).astimezone(JST).date()
+        except Exception:
+            continue
+        if d == target_date:
+            return i
+    return None
+
+
+def _get_jma_forecast():
+    """
+    気象庁公式サイトの予報JSONから、今日/明日の天気概況文と最高/最低気温を取得する。
+    取得・解析に失敗した場合は空のdictを返す(呼び出し側はOpen-Meteoの値をそのまま使う)。
+    """
+    try:
+        res = requests.get(JMA_FORECAST_URL, timeout=8)
+        res.raise_for_status()
+        payload = res.json()
+
+        short_term = payload[0]  # 3日間予報(今日・明日・明後日の天気文言)
+        weekly = payload[1]  # 週間予報(7日分の最高/最低気温)
+
+        today = datetime.now(JST).date()
+        tomorrow = today + timedelta(days=1)
+
+        result = {}
+
+        # ----- 天気概況文(今日・明日) -----
+        weather_series = short_term["timeSeries"][0]
+        area = weather_series["areas"][0]  # 函館地方気象台の代表エリア
+        time_defines = weather_series["timeDefines"]
+        weathers = area.get("weathers") or []
+        codes = area.get("weatherCodes") or []
+
+        idx_today = _find_date_index(time_defines, today)
+        idx_tomorrow = _find_date_index(time_defines, tomorrow)
+
+        if idx_today is not None and idx_today < len(weathers):
+            result["today_condition"] = weathers[idx_today].replace("　", " ").strip()
+            if idx_today < len(codes):
+                result["today_icon"] = _jma_code_icon(codes[idx_today])
+
+        if idx_tomorrow is not None and idx_tomorrow < len(weathers):
+            result["tomorrow_condition"] = weathers[idx_tomorrow].replace("　", " ").strip()
+            if idx_tomorrow < len(codes):
+                result["tomorrow_icon"] = _jma_code_icon(codes[idx_tomorrow])
+
+        # ----- 最高/最低気温(週間予報の方が今日・明日を含む7日分をまとめて持っている) -----
+        temp_series = weekly["timeSeries"][1]
+        temp_area = temp_series["areas"][0]  # 函館の代表アメダス地点
+        temp_time_defines = temp_series["timeDefines"]
+        temps_min = temp_area.get("tempsMin") or []
+        temps_max = temp_area.get("tempsMax") or []
+
+        idx_today = _find_date_index(temp_time_defines, today)
+        idx_tomorrow = _find_date_index(temp_time_defines, tomorrow)
+
+        def _to_int(v):
+            try:
+                return round(float(v))
+            except (TypeError, ValueError):
+                return None
+
+        if idx_today is not None:
+            tmax = _to_int(temps_max[idx_today]) if idx_today < len(temps_max) else None
+            tmin = _to_int(temps_min[idx_today]) if idx_today < len(temps_min) else None
+            if tmax is not None:
+                result["today_max"] = tmax
+            if tmin is not None:
+                result["today_min"] = tmin
+
+        if idx_tomorrow is not None:
+            tmax = _to_int(temps_max[idx_tomorrow]) if idx_tomorrow < len(temps_max) else None
+            tmin = _to_int(temps_min[idx_tomorrow]) if idx_tomorrow < len(temps_min) else None
+            if tmax is not None:
+                result["tomorrow_max"] = tmax
+            if tmin is not None:
+                result["tomorrow_min"] = tmin
+
+        return result
+    except Exception:
+        # JMA側の取得・解析に失敗しても、現在の気温(Open-Meteo側)には影響させない
+        return {}
 
 
 def get_current_weather(force_refresh=False):
@@ -113,6 +230,11 @@ def get_current_weather(force_refresh=False):
         result["tomorrow_icon"] = tomorrow_icon
         result["tomorrow_max"] = round(daily_max[1])
         result["tomorrow_min"] = round(daily_min[1])
+
+    # 気象庁公式の予報値が取れた場合は、そちら(今日/明日の最高最低・天気文言)で上書きする。
+    # (Open-Meteoはモデル予測値なのに対し、こちらは気象庁が実際に発表している値そのもの)
+    jma = _get_jma_forecast()
+    result.update(jma)
 
     _cache["data"] = result
     _cache["fetched_at"] = now
