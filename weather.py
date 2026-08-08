@@ -74,6 +74,9 @@ def get_current_weather(force_refresh=False):
                 "daily": "temperature_2m_max,temperature_2m_min,weather_code",
                 "forecast_days": 2,
                 "timezone": "Asia/Tokyo",
+                # 既定(best_match)は海外モデルとのブレンドで日本国内の精度が
+                # 落ちることがあるため、気象庁(JMA)のモデルを明示指定する
+                "models": "jma_seamless",
             },
             timeout=8,
         )
