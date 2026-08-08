@@ -111,11 +111,24 @@ def build_system_prompt():
     # 渡すことで、チャットで聞かれたときにその場で正しく答えられるようにする。
     current_weather = weather.get_current_weather()
     if current_weather:
-        lines.append(
+        weather_line = (
             "現在の天気(函館市): "
             f"{current_weather['condition']}({current_weather['icon']}) "
             f"気温{current_weather['temp']}°C 湿度{current_weather['humidity']}%"
         )
+        if "today_max" in current_weather and "today_min" in current_weather:
+            weather_line += (
+                f" / 今日の最高{current_weather['today_max']}°C"
+                f"・最低{current_weather['today_min']}°C"
+            )
+        lines.append(weather_line)
+
+        if "tomorrow_condition" in current_weather:
+            lines.append(
+                "明日の天気(函館市): "
+                f"{current_weather['tomorrow_condition']}({current_weather['tomorrow_icon']}) "
+                f"最高{current_weather['tomorrow_max']}°C・最低{current_weather['tomorrow_min']}°C"
+            )
     else:
         lines.append("現在の天気情報は取得できませんでした(取得エラー)。")
 
@@ -321,7 +334,7 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
   .portrait-card {
     position: relative;
     flex: 1 1 auto;
-    min-height: 0;
+    min-height: 220px;
     border-radius: 18px;
     overflow: hidden;
     border: 1px solid var(--border);
@@ -366,7 +379,10 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
   }
   .weather-chip .icon { font-size: 14px; }
   .weather-chip .temp { color: var(--text); font-weight: 500; }
+  .weather-chip .range { color: var(--text-dim); font-size: 10.5px; }
   .weather-chip .humidity { color: var(--text-dim); }
+  .weather-chip-tomorrow { opacity: 0.8; }
+  .weather-chip-tomorrow .tomorrow-label { color: var(--text-dim); font-size: 10.5px; }
 
   .clock-chip {
     font-family: "Space Grotesk", sans-serif;
@@ -381,47 +397,55 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
 
   .news-card {
     flex: 0 0 auto;
+    max-height: 128px;
     border-radius: 16px;
     border: 1px solid var(--border);
     background: var(--panel);
     backdrop-filter: blur(8px);
-    padding: 12px 14px;
+    padding: 10px 12px;
     overflow-y: auto;
   }
   .news-label {
     font-family: "JetBrains Mono", monospace;
-    font-size: 10px;
+    font-size: 9.5px;
     letter-spacing: 0.16em;
     color: var(--accent);
-    margin-bottom: 8px;
+    margin-bottom: 5px;
   }
   .news-thumb {
     display: none;
     width: 100%;
-    height: 76px;
+    height: 40px;
     object-fit: cover;
-    border-radius: 10px;
-    margin-bottom: 8px;
+    border-radius: 8px;
+    margin-bottom: 5px;
     border: 1px solid var(--border);
   }
   .news-featured-title {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--text);
-    line-height: 1.4;
-    margin-bottom: 4px;
+    line-height: 1.35;
+    margin-bottom: 2px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
   }
   .news-featured-desc {
     display: none;
-    font-size: 11.5px;
+    font-size: 11px;
     color: var(--text-dim);
-    line-height: 1.45;
-    margin-bottom: 10px;
+    line-height: 1.4;
+    margin-bottom: 6px;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
   }
   .news-divider {
     border: none;
     border-top: 1px solid var(--border);
-    margin: 0 0 8px;
+    margin: 0 0 5px;
   }
   .news-list {
     list-style: none;
@@ -429,14 +453,18 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
   }
   .news-list li {
     position: relative;
     padding-left: 12px;
-    font-size: 11.5px;
-    line-height: 1.4;
+    font-size: 11px;
+    line-height: 1.35;
     color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    overflow: hidden;
   }
   .news-list li::before {
     content: "・";
@@ -449,6 +477,14 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
   #chatPane {
     flex: 1 1 auto;
     min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #app {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
   }
@@ -503,6 +539,7 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
 
   #log {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     padding: 18px 16px 10px;
@@ -651,7 +688,13 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <div class="weather-chip" id="weatherChip">
           <span class="icon">🌡️</span>
           <span class="temp">--°C</span>
+          <span class="range">↑--° ↓--°</span>
           <span class="humidity">--%</span>
+        </div>
+        <div class="weather-chip weather-chip-tomorrow" id="weatherTomorrowChip">
+          <span class="tomorrow-label">明日</span>
+          <span class="icon">🌡️</span>
+          <span class="range">↑--° ↓--°</span>
         </div>
         <div class="clock-chip" id="clock">--:--</div>
       </div>
@@ -715,6 +758,7 @@ const sendBtn = document.getElementById('send');
 const statusDot = document.getElementById('statusDot');
 const statusLabel = document.getElementById('statusLabel');
 const weatherChip = document.getElementById('weatherChip');
+const weatherTomorrowChip = document.getElementById('weatherTomorrowChip');
 const portraitImg = document.getElementById('portraitImg');
 
 let lastUserMessage = null;
@@ -878,6 +922,22 @@ async function loadWeather() {
     weatherChip.querySelector('.icon').textContent = data.icon;
     weatherChip.querySelector('.temp').textContent = data.temp + '°C';
     weatherChip.querySelector('.humidity').textContent = data.humidity + '%';
+
+    const rangeEl = weatherChip.querySelector('.range');
+    if (data.today_max !== undefined && data.today_min !== undefined) {
+      rangeEl.textContent = `↑${data.today_max}° ↓${data.today_min}°`;
+    } else {
+      rangeEl.textContent = '';
+    }
+
+    if (data.tomorrow_condition !== undefined) {
+      weatherTomorrowChip.style.display = '';
+      weatherTomorrowChip.querySelector('.icon').textContent = data.tomorrow_icon;
+      weatherTomorrowChip.querySelector('.range').textContent =
+        `↑${data.tomorrow_max}° ↓${data.tomorrow_min}°`;
+    } else {
+      weatherTomorrowChip.style.display = 'none';
+    }
   } catch (e) {
     weatherChip.querySelector('.temp').textContent = '--°C';
     weatherChip.querySelector('.humidity').textContent = '--%';
@@ -923,7 +983,7 @@ async function loadNews() {
     }
 
     newsList.innerHTML = '';
-    others.slice(0, 4).forEach((headline) => {
+    others.slice(0, 2).forEach((headline) => {
       const li = document.createElement('li');
       li.textContent = headline;
       newsList.appendChild(li);
