@@ -136,6 +136,15 @@ def build_system_prompt():
     else:
         lines.append("現在の天気情報は取得できませんでした(取得エラー)。")
 
+    weekly_days = weather.get_weekly_forecast()
+    if weekly_days:
+        week_line = "今週の天気(函館市): " + " / ".join(
+            f"{d['date']}({d['weekday']}) {d['condition']}"
+            + (f" {d['max']}/{d['min']}°C" if d['max'] is not None else "")
+            for d in weekly_days
+        )
+        lines.append(week_line)
+
     news_data = news.get_news()
     featured = news_data.get("featured")
     others = news_data.get("others") or []
@@ -250,6 +259,12 @@ def api_weather():
     if not data:
         return jsonify({"error": "weather unavailable"}), 503
     return jsonify(data)
+
+
+@app.route("/api/weather/week")
+def api_weather_week():
+    days = weather.get_weekly_forecast()
+    return jsonify({"days": days})
 
 
 @app.route("/api/news")
@@ -415,6 +430,40 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 10px 12px;
     overflow-y: auto;
   }
+  .week-card {
+    flex: 0 0 auto;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+    padding: 10px 12px;
+  }
+  .week-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .week-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .week-row .week-day {
+    width: 42px;
+    flex-shrink: 0;
+    color: var(--text);
+  }
+  .week-row .week-icon { width: 18px; flex-shrink: 0; text-align: center; }
+  .week-row .week-condition {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .week-row .week-range { flex-shrink: 0; font-family: "JetBrains Mono", monospace; }
   .news-label {
     font-family: "JetBrains Mono", monospace;
     font-size: 9.5px;
@@ -682,6 +731,7 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     .news-featured-desc { display: none !important; }
     .news-divider { display: none; }
     .news-list { display: none; }
+    .week-card { display: none; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -716,6 +766,10 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
       <div class="news-featured-desc" id="newsFeaturedDesc"></div>
       <hr class="news-divider">
       <ul class="news-list" id="newsList"></ul>
+    </div>
+    <div class="week-card" id="weekCard">
+      <div class="news-label">WEEK</div>
+      <div class="week-list" id="weekList"></div>
     </div>
   </aside>
 
@@ -955,6 +1009,34 @@ async function loadWeather() {
 }
 loadWeather();
 setInterval(loadWeather, 10 * 60 * 1000);
+
+// ===== 週間予報(読み込み時+10分ごとに更新) =====
+const weekList = document.getElementById('weekList');
+async function loadWeek() {
+  try {
+    const res = await fetch('/api/weather/week');
+    if (!res.ok) throw new Error('bad status');
+    const data = await res.json();
+    weekList.innerHTML = '';
+    for (const d of (data.days || [])) {
+      const row = document.createElement('div');
+      row.className = 'week-row';
+      const range = (d.max !== null && d.min !== null) ? `${d.max}°/${d.min}°` : '--';
+      row.innerHTML = `
+        <span class="week-day">${d.date}(${d.weekday})</span>
+        <span class="week-icon">${d.icon || ''}</span>
+        <span class="week-condition"></span>
+        <span class="week-range">${range}</span>
+      `;
+      row.querySelector('.week-condition').textContent = d.condition || '';
+      weekList.appendChild(row);
+    }
+  } catch (e) {
+    // 取得に失敗しても他のHUD要素には影響させない
+  }
+}
+loadWeek();
+setInterval(loadWeek, 10 * 60 * 1000);
 
 // ===== ニュース(読み込み時+15分ごとに更新) =====
 const newsThumb = document.getElementById('newsThumb');

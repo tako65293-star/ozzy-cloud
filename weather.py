@@ -85,6 +85,113 @@ def _find_date_index(time_defines, target_date):
     return None
 
 
+_WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+_weekly_cache = {"data": None, "fetched_at": 0.0}
+
+
+def get_weekly_forecast(force_refresh=False):
+    """
+    気象庁公式の週間予報から、今日を含む7日分の[{date, weekday, condition, icon, max, min}, ...]を返す。
+    取得・解析に失敗した場合は空リストを返す。
+    """
+    now = time.time()
+    if not force_refresh and _weekly_cache["data"] is not None and (now - _weekly_cache["fetched_at"]) < _CACHE_TTL:
+        return _weekly_cache["data"]
+
+    try:
+        res = requests.get(JMA_FORECAST_URL, timeout=8)
+        res.raise_for_status()
+        payload = res.json()
+
+        short_term = payload[0]
+        weekly = payload[1]
+
+        # 天気文言・コードは、3日間予報(今日・明日・明後日を含む、より詳しい文言)と
+        # 週間予報(7日分、文言は簡素)の両方を日付でマージして使う。
+        weather_lookup = {}  # date -> (condition_text, icon)
+
+        short_weather_series = short_term["timeSeries"][0]
+        for area in short_weather_series.get("areas", [])[:1]:
+            for t, w, c in zip(
+                short_weather_series["timeDefines"],
+                area.get("weathers") or [],
+                area.get("weatherCodes") or [],
+            ):
+                try:
+                    d = datetime.fromisoformat(t).astimezone(JST).date()
+                except Exception:
+                    continue
+                weather_lookup[d] = (w.replace("　", " ").strip(), _jma_code_icon(c))
+
+        weekly_weather_series = weekly["timeSeries"][0]
+        for area in weekly_weather_series.get("areas", [])[:1]:
+            for t, c in zip(
+                weekly_weather_series["timeDefines"],
+                area.get("weatherCodes") or [],
+            ):
+                try:
+                    d = datetime.fromisoformat(t).astimezone(JST).date()
+                except Exception:
+                    continue
+                if d not in weather_lookup:
+                    label, icon = _CODE_MAP.get(int(c) // 100 * 100, (None, None)) if c else (None, None)
+                    weather_lookup[d] = (label or "", icon or _jma_code_icon(c))
+
+        # 気温は3日間予報+週間予報を日付でマージ(今日は3日間予報側にしかないことが多いため)
+        temp_lookup = {}  # date -> (max, min)
+
+        def _to_int(v):
+            try:
+                return round(float(v))
+            except (TypeError, ValueError):
+                return None
+
+        for series in (short_term["timeSeries"][-1], weekly["timeSeries"][1]):
+            areas = series.get("areas") or []
+            if not areas:
+                continue
+            area = areas[0]
+            tmax_list = area.get("tempsMax") or area.get("temps") or []
+            tmin_list = area.get("tempsMin") or []
+            for i, t in enumerate(series["timeDefines"]):
+                try:
+                    d = datetime.fromisoformat(t).astimezone(JST).date()
+                except Exception:
+                    continue
+                tmax = _to_int(tmax_list[i]) if i < len(tmax_list) else None
+                tmin = _to_int(tmin_list[i]) if i < len(tmin_list) else None
+                if d not in temp_lookup:
+                    temp_lookup[d] = [None, None]
+                if tmax is not None:
+                    temp_lookup[d][0] = tmax
+                if tmin is not None:
+                    temp_lookup[d][1] = tmin
+
+        today = datetime.now(JST).date()
+        days = []
+        for i in range(7):
+            d = today + timedelta(days=i)
+            condition, icon = weather_lookup.get(d, ("", "🌡️"))
+            tmax, tmin = temp_lookup.get(d, (None, None))
+            if tmax is None and tmin is None and not condition:
+                continue  # データが無い日は飛ばす(週の終盤など)
+            days.append({
+                "date": d.strftime("%m/%d"),
+                "weekday": _WEEKDAY_JP[d.weekday()],
+                "condition": condition,
+                "icon": icon,
+                "max": tmax,
+                "min": tmin,
+            })
+
+        _weekly_cache["data"] = days
+        _weekly_cache["fetched_at"] = now
+        return days
+    except Exception:
+        return _weekly_cache["data"] or []
+
+
 def _get_jma_forecast():
     """
     気象庁公式サイトの予報JSONから、今日/明日の天気概況文と最高/最低気温を取得する。
