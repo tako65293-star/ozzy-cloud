@@ -123,37 +123,57 @@ def _get_jma_forecast():
             if idx_tomorrow < len(codes):
                 result["tomorrow_icon"] = _jma_code_icon(codes[idx_tomorrow])
 
-        # ----- 最高/最低気温(週間予報の方が今日・明日を含む7日分をまとめて持っている) -----
-        temp_series = weekly["timeSeries"][1]
-        temp_area = temp_series["areas"][0]  # 函館の代表アメダス地点
-        temp_time_defines = temp_series["timeDefines"]
-        temps_min = temp_area.get("tempsMin") or []
-        temps_max = temp_area.get("tempsMax") or []
-
-        idx_today = _find_date_index(temp_time_defines, today)
-        idx_tomorrow = _find_date_index(temp_time_defines, tomorrow)
-
+        # ----- 最高/最低気温 -----
+        # 「今日」は3日間予報側(timeSeries[2])に入っていることが多く、
+        # 「週間予報」側(weekly)は"明日から7日分"で今日を含まないことがある。
+        # そのため、今日は3日間予報→(無ければ)週間予報の順で、
+        # 明日は週間予報→(無ければ)3日間予報の順で探す。
         def _to_int(v):
             try:
                 return round(float(v))
             except (TypeError, ValueError):
                 return None
 
-        if idx_today is not None:
-            tmax = _to_int(temps_max[idx_today]) if idx_today < len(temps_max) else None
-            tmin = _to_int(temps_min[idx_today]) if idx_today < len(temps_min) else None
-            if tmax is not None:
-                result["today_max"] = tmax
-            if tmin is not None:
-                result["today_min"] = tmin
+        def _lookup_temps(series_areas_source, target_date):
+            """(timeDefines, areas)の組から、target_dateに一致する日のtempsMax/tempsMinを探す"""
+            for time_defines, areas in series_areas_source:
+                if not areas:
+                    continue
+                idx = _find_date_index(time_defines, target_date)
+                if idx is None:
+                    continue
+                a = areas[0]
+                tmax_list = a.get("tempsMax") or a.get("temps") or []
+                tmin_list = a.get("tempsMin") or []
+                tmax = _to_int(tmax_list[idx]) if idx < len(tmax_list) else None
+                tmin = _to_int(tmin_list[idx]) if idx < len(tmin_list) else None
+                if tmax is not None or tmin is not None:
+                    return tmax, tmin
+            return None, None
 
-        if idx_tomorrow is not None:
-            tmax = _to_int(temps_max[idx_tomorrow]) if idx_tomorrow < len(temps_max) else None
-            tmin = _to_int(temps_min[idx_tomorrow]) if idx_tomorrow < len(temps_min) else None
-            if tmax is not None:
-                result["tomorrow_max"] = tmax
-            if tmin is not None:
-                result["tomorrow_min"] = tmin
+        short_temp_series = short_term["timeSeries"][-1]  # 3日間予報側の気温シリーズ(通常は最後)
+        weekly_temp_series = weekly["timeSeries"][1]  # 週間予報側の気温シリーズ
+
+        sources_for_today = [
+            (short_temp_series["timeDefines"], short_temp_series["areas"]),
+            (weekly_temp_series["timeDefines"], weekly_temp_series["areas"]),
+        ]
+        sources_for_tomorrow = [
+            (weekly_temp_series["timeDefines"], weekly_temp_series["areas"]),
+            (short_temp_series["timeDefines"], short_temp_series["areas"]),
+        ]
+
+        tmax, tmin = _lookup_temps(sources_for_today, today)
+        if tmax is not None:
+            result["today_max"] = tmax
+        if tmin is not None:
+            result["today_min"] = tmin
+
+        tmax, tmin = _lookup_temps(sources_for_tomorrow, tomorrow)
+        if tmax is not None:
+            result["tomorrow_max"] = tmax
+        if tmin is not None:
+            result["tomorrow_min"] = tmin
 
         return result
     except Exception:
