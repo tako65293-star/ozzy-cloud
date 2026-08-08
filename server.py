@@ -31,11 +31,11 @@ UI(_CHAT_PAGE_TEMPLATE)について:
     横画面(スマホを横向きで使う想定・PC)ではこの2カラムを維持し、
     縦画面のときだけcompanionを上部の細いバーに畳む(CSSのorientationクエリで切替)。
 
-    ミタマの表情切り替え(感情に応じてstatic/mitama/配下の画像を差し替える機能)は
-    今回のスコープには含めていない。static/mitama/には次回のために
-    smile.png / heart_eyes.png / crying.png / wailing.png / gentle_smile.png /
-    surprised.png / stunned.png / angry.png / impressed.png / eyes_closed.png /
-    blank.png / sparkle.png を用意済み(現状はbase.jpgのみ使用)。
+    ミタマの表情切り替え:
+    OZZYの返答をGroq(MODEL_FAST)にもう一度渡し、感情を1語だけ分類させて、
+    static/mitama/配下の該当画像にクライアント側で差し替える(classify_emotion)。
+    数秒(REVERT_MS)経つと自動でbase.pngに戻る。
+    立ち絵はさらにCSSのidle-floatアニメーションで常時わずかに揺れる。
 
     ニュース枠は今回は見た目のみのプレースホルダー(実データ連携は次回)。
 """
@@ -61,6 +61,21 @@ chat_history = []
 # 「覚えて」「〇〇って覚えて」を検出する(PC版main.pyのtry_remember相当)
 _REMEMBER_RE = re.compile(r"(.+?)って覚えて|覚えて[、。]?(.+)?$")
 _NAME_RE = re.compile(r"私の名前は(.+?)です")
+
+# ミタマの表情ファイル(static/mitama/配下)。感情分類の出力キーと対応させる。
+EMOTION_FILES = {
+    "smile": "smile.png",
+    "heart_eyes": "heart_eyes.png",
+    "crying": "crying.png",
+    "wailing": "wailing.png",
+    "gentle_smile": "gentle_smile.png",
+    "surprised": "surprised.png",
+    "stunned": "stunned.png",
+    "angry": "angry.png",
+    "impressed": "impressed.png",
+    "eyes_closed": "eyes_closed.png",
+    "neutral": "base.png",
+}
 
 
 def try_remember(user_input):
@@ -113,6 +128,35 @@ def ask_ozzy(user_input, history, mode="casual"):
         return "すみません、少し考えるのに時間がかかりすぎたようです。もう一度話しかけてもらえますか?"
 
 
+def classify_emotion(reply_text):
+    """
+    OZZYの返答テキストから、ミタマに表示させる表情を1つだけ判定する。
+    軽量モデル(MODEL_FAST)で十分な単純タスクなので、雑談生成本体とは別に
+    もう一度Groqを呼ぶ(判定に失敗・接続エラーの場合は"neutral"にフォールバックする)。
+    """
+    prompt = (
+        "次のセリフを話しているキャラクターの表情として、"
+        "以下の単語のうち最もふさわしいものを1つだけ出力してください。"
+        "説明文は書かず、単語だけを出力してください。\n\n"
+        f"選択肢: {', '.join(EMOTION_FILES.keys())}\n\n"
+        f"セリフ: 「{reply_text}」"
+    )
+    try:
+        raw = llm_client.chat(
+            [{"role": "user", "content": prompt}],
+            model=llm_client.MODEL_FAST,
+            timeout=15,
+        )
+    except Exception:
+        return "neutral"
+
+    raw = raw.strip().lower()
+    for key in EMOTION_FILES:
+        if key in raw:
+            return key
+    return "neutral"
+
+
 @app.route("/api/send", methods=["POST"])
 def api_send():
     data = request.get_json(silent=True) or {}
@@ -122,12 +166,18 @@ def api_send():
 
     remembered = try_remember(user_input)
     reply = ask_ozzy(user_input, chat_history)
+    emotion = classify_emotion(reply)
 
     chat_history.append({"role": "user", "content": user_input})
     chat_history.append({"role": "assistant", "content": reply})
     del chat_history[:-20]
 
-    return jsonify({"reply": reply, "remembered": remembered, "name": personality["name"]})
+    return jsonify({
+        "reply": reply,
+        "remembered": remembered,
+        "name": personality["name"],
+        "image": EMOTION_FILES[emotion],
+    })
 
 
 @app.route("/api/weather")
@@ -234,6 +284,12 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     object-fit: cover;
     object-position: top center;
     display: block;
+    animation: idle-float 4s ease-in-out infinite;
+    transition: opacity .15s ease;
+  }
+  @keyframes idle-float {
+    0%, 100% { transform: translateY(0) scale(1); }
+    50% { transform: translateY(-6px) scale(1.02); }
   }
 
   .hud-bar {
@@ -491,7 +547,7 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
 <div id="stage">
   <aside id="companion">
     <div class="portrait-card">
-      <img src="/static/mitama/base.jpg" alt="ミタマ">
+      <img src="/static/mitama/base.png" alt="ミタマ" id="portraitImg">
       <div class="hud-bar">
         <div class="weather-chip" id="weatherChip">
           <span class="icon">🌡️</span>
@@ -556,8 +612,19 @@ const sendBtn = document.getElementById('send');
 const statusDot = document.getElementById('statusDot');
 const statusLabel = document.getElementById('statusLabel');
 const weatherChip = document.getElementById('weatherChip');
+const portraitImg = document.getElementById('portraitImg');
 
 let lastUserMessage = null;
+let revertTimer = null;
+
+// 表情画像に切り替え、しばらくしたら自動でbase.pngに戻す
+function setExpression(imageFile) {
+  portraitImg.src = '/static/mitama/' + imageFile;
+  clearTimeout(revertTimer);
+  revertTimer = setTimeout(() => {
+    portraitImg.src = '/static/mitama/base.png';
+  }, 6000);
+}
 
 function formatTime(d) {
   return d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -648,6 +715,7 @@ async function sendMessage(text) {
 
     setStatus('online', 'ONLINE');
     if (data.remembered) addRememberedChip(typing.row);
+    if (data.image) setExpression(data.image);
   } catch (err) {
     typing.bubble.classList.add('error');
     typing.bubble.textContent = '接続に失敗しました。もう一度お試しください。';
