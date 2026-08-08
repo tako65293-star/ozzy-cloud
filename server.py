@@ -119,10 +119,17 @@ def build_system_prompt():
     else:
         lines.append("現在の天気情報は取得できませんでした(取得エラー)。")
 
-    headlines = news.get_top_news()
-    if headlines:
-        lines.append("最新ニュース見出し:\n" + "\n".join(f"・{h}" for h in headlines))
-    else:
+    news_data = news.get_news()
+    featured = news_data.get("featured")
+    others = news_data.get("others") or []
+    if featured:
+        detail = f"注目ニュース: 「{featured['title']}」"
+        if featured.get("description"):
+            detail += f" — {featured['description']}"
+        lines.append(detail)
+    if others:
+        lines.append("その他の見出し:\n" + "\n".join(f"・{h}" for h in others))
+    if not featured and not others:
         lines.append("最新ニュースは取得できませんでした(取得エラー)。")
 
     if memory.get("user_name"):
@@ -134,6 +141,11 @@ def build_system_prompt():
         "上記の天気・ニュース情報は、ユーザーから聞かれたときや話題に関係する"
         "ときだけ使ってください。毎回の返答で自分から天気やニュースの話を"
         "始める必要はありません。"
+        "「今日のニュース」などと聞かれた場合は、上記の注目ニュースについて、"
+        "分かっている情報(タイトル・概要)をもとに3〜4文程度でそこそこ詳しく、"
+        "分かりやすく説明してください。概要の情報が少ない場合は、"
+        "分かる範囲で説明したうえで詳細は元記事を確認してほしい旨を伝えてください。"
+        "存在しない詳細を作り話しないでください。"
         "このクラウド版にはPC操作系のツール(アプリ起動・音量調整など)はありません。"
         "PC操作を頼まれた場合は、PC版OZZYで対応してほしい旨を伝えてください。"
     )
@@ -219,10 +231,10 @@ def api_weather():
 
 @app.route("/api/news")
 def api_news():
-    headlines = news.get_top_news()
-    if not headlines:
-        return jsonify({"error": "news unavailable", "headlines": []}), 503
-    return jsonify({"headlines": headlines})
+    data = news.get_news()
+    if not data.get("featured") and not data.get("others"):
+        return jsonify({"error": "news unavailable", "featured": None, "others": []}), 503
+    return jsonify(data)
 
 
 @app.route("/")
@@ -374,19 +386,63 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     background: var(--panel);
     backdrop-filter: blur(8px);
     padding: 12px 14px;
+    overflow-y: auto;
   }
   .news-label {
     font-family: "JetBrains Mono", monospace;
     font-size: 10px;
     letter-spacing: 0.16em;
     color: var(--accent);
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }
-  .news-body {
+  .news-thumb {
+    display: none;
+    width: 100%;
+    height: 76px;
+    object-fit: cover;
+    border-radius: 10px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border);
+  }
+  .news-featured-title {
     font-size: 13px;
-    line-height: 1.5;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.4;
+    margin-bottom: 4px;
+  }
+  .news-featured-desc {
+    display: none;
+    font-size: 11.5px;
     color: var(--text-dim);
-    white-space: pre-line;
+    line-height: 1.45;
+    margin-bottom: 10px;
+  }
+  .news-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 0 0 8px;
+  }
+  .news-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .news-list li {
+    position: relative;
+    padding-left: 12px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--text-dim);
+  }
+  .news-list li::before {
+    content: "・";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
   }
 
   /* ===== 右カラム: チャット ===== */
@@ -571,9 +627,13 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     .portrait-card { flex: 0 0 84px; height: 84px; border-radius: 14px; }
     .hud-bar { flex-direction: column; align-items: flex-start; gap: 4px; padding: 6px 8px; }
     .weather-chip, .clock-chip { font-size: 10.5px; padding: 3px 7px; }
-    .news-card { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: center; padding: 8px 12px; }
-    .news-label { margin-bottom: 2px; }
-    .news-body { font-size: 12px; }
+    .news-card { flex: 1 1 auto; padding: 8px 12px; max-height: 84px; }
+    .news-label { margin-bottom: 4px; }
+    .news-thumb { display: none !important; }
+    .news-featured-title { font-size: 11.5px; margin-bottom: 2px; -webkit-line-clamp: 2; display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+    .news-featured-desc { display: none !important; }
+    .news-divider { display: none; }
+    .news-list { display: none; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -597,7 +657,11 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="news-card">
       <div class="news-label">NEWS</div>
-      <div class="news-body" id="newsBody">ニュース連携は準備中です。</div>
+      <img class="news-thumb" id="newsThumb" alt="">
+      <div class="news-featured-title" id="newsFeaturedTitle">読み込み中...</div>
+      <div class="news-featured-desc" id="newsFeaturedDesc"></div>
+      <hr class="news-divider">
+      <ul class="news-list" id="newsList"></ul>
     </div>
   </aside>
 
@@ -822,18 +886,52 @@ loadWeather();
 setInterval(loadWeather, 10 * 60 * 1000);
 
 // ===== ニュース(読み込み時+15分ごとに更新) =====
-const newsBody = document.getElementById('newsBody');
+const newsThumb = document.getElementById('newsThumb');
+const newsFeaturedTitle = document.getElementById('newsFeaturedTitle');
+const newsFeaturedDesc = document.getElementById('newsFeaturedDesc');
+const newsList = document.getElementById('newsList');
+
 async function loadNews() {
   try {
     const res = await fetch('/api/news');
     if (!res.ok) throw new Error('bad status');
     const data = await res.json();
-    const headlines = data.headlines || [];
-    newsBody.textContent = headlines.length
-      ? headlines.slice(0, 4).join('\\n')
-      : 'ニュースを取得できませんでした。';
+    const featured = data.featured;
+    const others = data.others || [];
+
+    if (featured) {
+      newsFeaturedTitle.textContent = featured.title;
+
+      if (featured.image) {
+        newsThumb.src = featured.image;
+        newsThumb.style.display = 'block';
+      } else {
+        newsThumb.style.display = 'none';
+      }
+
+      if (featured.description) {
+        newsFeaturedDesc.textContent = featured.description;
+        newsFeaturedDesc.style.display = 'block';
+      } else {
+        newsFeaturedDesc.style.display = 'none';
+      }
+    } else {
+      newsFeaturedTitle.textContent = 'ニュースを取得できませんでした。';
+      newsThumb.style.display = 'none';
+      newsFeaturedDesc.style.display = 'none';
+    }
+
+    newsList.innerHTML = '';
+    others.slice(0, 4).forEach((headline) => {
+      const li = document.createElement('li');
+      li.textContent = headline;
+      newsList.appendChild(li);
+    });
   } catch (e) {
-    newsBody.textContent = 'ニュースを取得できませんでした。';
+    newsFeaturedTitle.textContent = 'ニュースを取得できませんでした。';
+    newsThumb.style.display = 'none';
+    newsFeaturedDesc.style.display = 'none';
+    newsList.innerHTML = '';
   }
 }
 loadNews();
