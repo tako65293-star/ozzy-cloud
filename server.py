@@ -41,17 +41,24 @@ UI(_CHAT_PAGE_TEMPLATE)について:
 """
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request
 
 import llm_client
 import memory_manager
+import news
 import weather
 from personality import build_personality_prompt, get_num_predict, personality
 
 app = Flask(__name__)
 
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+# Renderのサーバー環境はデフォルトのタイムゾーンがUTCになっていることが多く、
+# datetime.now()をそのまま使うとチャットの「現在日時」が実際とズレる。
+# 常に日本時間で計算するようにこれを明示的に指定する。
+JST = ZoneInfo("Asia/Tokyo")
 
 memory = memory_manager.get_all()
 
@@ -93,18 +100,40 @@ def try_remember(user_input):
 
 
 def build_system_prompt():
-    now = datetime.now()
+    now = datetime.now(JST)
     weekday = WEEKDAY_JP[now.weekday()]
     lines = [
         build_personality_prompt(),
-        f"現在日時: {now.strftime('%Y年%m月%d日')}({weekday}) {now.strftime('%H:%M')}",
+        f"現在日時: {now.strftime('%Y年%m月%d日')}({weekday}) {now.strftime('%H:%M')}(日本時間)",
     ]
+
+    # 天気・ニュースはUIのHUD/ニュース枠と同じデータソースをそのままLLMにも
+    # 渡すことで、チャットで聞かれたときにその場で正しく答えられるようにする。
+    current_weather = weather.get_current_weather()
+    if current_weather:
+        lines.append(
+            "現在の天気(函館市): "
+            f"{current_weather['condition']}({current_weather['icon']}) "
+            f"気温{current_weather['temp']}°C 湿度{current_weather['humidity']}%"
+        )
+    else:
+        lines.append("現在の天気情報は取得できませんでした(取得エラー)。")
+
+    headlines = news.get_top_news()
+    if headlines:
+        lines.append("最新ニュース見出し:\n" + "\n".join(f"・{h}" for h in headlines))
+    else:
+        lines.append("最新ニュースは取得できませんでした(取得エラー)。")
+
     if memory.get("user_name"):
         lines.append(f"ユーザーの名前: {memory['user_name']}")
     lines.append("これまでに覚えていること:\n" + memory_manager.build_memory_prompt())
     lines.append(
         "注意: 分からないことを自信ありげに作り話しないでください。"
         "分からない場合は正直に「分かりません」と答えてください。"
+        "上記の天気・ニュース情報は、ユーザーから聞かれたときや話題に関係する"
+        "ときだけ使ってください。毎回の返答で自分から天気やニュースの話を"
+        "始める必要はありません。"
         "このクラウド版にはPC操作系のツール(アプリ起動・音量調整など)はありません。"
         "PC操作を頼まれた場合は、PC版OZZYで対応してほしい旨を伝えてください。"
     )
@@ -186,6 +215,14 @@ def api_weather():
     if not data:
         return jsonify({"error": "weather unavailable"}), 503
     return jsonify(data)
+
+
+@app.route("/api/news")
+def api_news():
+    headlines = news.get_top_news()
+    if not headlines:
+        return jsonify({"error": "news unavailable", "headlines": []}), 503
+    return jsonify({"headlines": headlines})
 
 
 @app.route("/")
@@ -349,6 +386,7 @@ _CHAT_PAGE_TEMPLATE = """<!DOCTYPE html>
     font-size: 13px;
     line-height: 1.5;
     color: var(--text-dim);
+    white-space: pre-line;
   }
 
   /* ===== 右カラム: チャット ===== */
@@ -782,6 +820,24 @@ async function loadWeather() {
 }
 loadWeather();
 setInterval(loadWeather, 10 * 60 * 1000);
+
+// ===== ニュース(読み込み時+15分ごとに更新) =====
+const newsBody = document.getElementById('newsBody');
+async function loadNews() {
+  try {
+    const res = await fetch('/api/news');
+    if (!res.ok) throw new Error('bad status');
+    const data = await res.json();
+    const headlines = data.headlines || [];
+    newsBody.textContent = headlines.length
+      ? headlines.slice(0, 4).join('\\n')
+      : 'ニュースを取得できませんでした。';
+  } catch (e) {
+    newsBody.textContent = 'ニュースを取得できませんでした。';
+  }
+}
+loadNews();
+setInterval(loadNews, 15 * 60 * 1000);
 </script>
 </body>
 </html>

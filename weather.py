@@ -7,10 +7,15 @@ Open-Meteo(https://open-meteo.com/)を使用。APIキー登録・クレジット
 現在地点は函館市の緯度経度を既定値としている。別の場所にしたい場合は
 下のLAT/LONを書き換えるだけでよい。
 """
+import time
+
 import requests
 
 LAT = 41.7687
 LON = 140.7291
+
+_CACHE_TTL = 10 * 60  # 10分
+_cache = {"data": None, "fetched_at": 0.0}
 
 # Open-MeteoのWMO weather codeを、日本語の一言説明と絵文字にざっくり変換する。
 # 全コードを網羅する必要はなく、HUD的にひと目で分かればよいという方針。
@@ -39,12 +44,18 @@ _CODE_MAP = {
 }
 
 
-def get_current_weather():
+def get_current_weather(force_refresh=False):
     """
     現在の気温・湿度・天気概況を取得する。
     取得に失敗した場合はNoneを返す(呼び出し側のserver.pyが
     エラー時のJSON応答を組み立てる)。
+    _CACHE_TTL秒以内の再取得はキャッシュを返す(チャット1往復ごとに
+    毎回Open-Meteoへ取りに行かないようにするため)。
     """
+    now = time.time()
+    if not force_refresh and _cache["data"] and (now - _cache["fetched_at"]) < _CACHE_TTL:
+        return _cache["data"]
+
     try:
         res = requests.get(
             "https://api.open-meteo.com/v1/forecast",
@@ -59,14 +70,18 @@ def get_current_weather():
         res.raise_for_status()
         data = res.json()["current"]
     except Exception:
-        return None
+        # 取得失敗時、直近のキャッシュが残っていればそれを使い回す
+        return _cache["data"]
 
     code = data.get("weather_code")
     label, icon = _CODE_MAP.get(code, ("不明", "🌡️"))
 
-    return {
+    result = {
         "temp": round(data.get("temperature_2m", 0)),
         "humidity": round(data.get("relative_humidity_2m", 0)),
         "condition": label,
         "icon": icon,
     }
+    _cache["data"] = result
+    _cache["fetched_at"] = now
+    return result
